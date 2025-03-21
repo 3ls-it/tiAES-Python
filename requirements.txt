@@ -1,0 +1,2 @@
+# Requirements
+numpy>=1.26.2

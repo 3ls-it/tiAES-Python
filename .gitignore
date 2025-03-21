@@ -1,0 +1,4 @@
+
+__pycache__
+# Ignore Vi backup files
+.*.un~
