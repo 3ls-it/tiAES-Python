@@ -235,10 +235,10 @@ def InvMixColumns(st: np.ndarray) -> np.ndarray:
     Implements the FIPS 197 InvMixColums() routine.
     Array st is the state.
     Performs GF(256) matrix muliplication mcdm*st, where
-    mcdm = [ 14  11  13  9  ]
-           [ 9   14  11  13 ]
-           [ 13  9   14  11 ]
-           [ 11  13  9   14 ]
+    mcdm = [ 14  11  13  09 ]
+           [ 09  14  11  13 ]
+           [ 13  09  14  11 ]
+           [ 11  13  09  14 ]
     """
     nst = st.copy()
     for c in range(4):
