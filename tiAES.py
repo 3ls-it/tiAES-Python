@@ -16,8 +16,8 @@ enjoyment.
 import os
 import gc
 import hashlib
+import hmac
 import argparse
-from secrets import token_hex
 from getpass import getpass
 import numpy as np
 from aes_tables import (NB,
@@ -29,6 +29,33 @@ from aes_tables import (NB,
                         m11,
                         m13,
                         m14)
+ 
+# ----------------------------------------------------------------------------
+def get_passphrase() -> str:
+    """
+    Prompt for a passphrase (minimum length: 16 characters).
+    """
+    plen = 0
+    while plen < 16:
+        pstr = getpass("Enter passphrase (min 16 chars): ")
+        plen = len(pstr)
+    return pstr
+
+def derive_keys(passphrase: str, salt: bytes = None, iterations: int = 100000) -> tuple:
+    """
+    Derive AES encryption key and HMAC key from a passphrase using PBKDF2-HMAC-SHA256.
+    Returns (enc_key_array, mac_key_bytes, salt).
+    """
+    if salt is None:
+        salt = os.urandom(16)
+    # Derive 64 bytes: first 32 for AES key, next 32 for HMAC key
+    km = hashlib.pbkdf2_hmac('sha256', passphrase.encode(), salt, iterations, dklen=64)
+    enc_key = np.frombuffer(km[:32], dtype=np.uint8)
+    mac_key = km[32:]
+    del km
+    gc.collect()
+    return enc_key, mac_key, salt
+# ----------------------------------------------------------------------------
 
 
 ## Functions
@@ -307,20 +334,10 @@ def InvCipher(st: np.ndarray, w: np.ndarray) -> np.ndarray:
 # Generate random IV
 def gen_iv() -> np.ndarray:
     """
-    Generates random IV
+    Generates a random 16-byte IV.
     """
-    rn = token_hex(64)
-    hsh = hashlib.sha256(str.encode(rn)).digest()
-    iv = np.zeros(16, dtype=np.uint8)
-    # We only need 16 bytes from the hash. We could use
-    # MD5 to get only 16, however, it has know vulnerabilities.
-    for i, b in enumerate(hsh):
-        if i == 16:
-            break
-        iv[i] = b
-    del rn, hsh
-    gc.collect()
-    iv = iv.reshape(4, 4)
+    iv_bytes = os.urandom(16)
+    iv = np.frombuffer(iv_bytes, dtype=np.uint8).reshape(4, 4)
     return iv
 # End gen_iv
 
@@ -341,8 +358,7 @@ def get_pad(sz: int) -> int:
     return pd
 # End get_pad
 
-# Encrpyt in CBC mode
-def cbcencr(fname: str, key: np.ndarray):
+def cbcencr(fname: str, key_sched: np.ndarray, mac_key: bytes, salt: bytes) -> None:
     """
     Encrypts in CBC mode.
     Saves output as fname.enc
@@ -364,121 +380,98 @@ def cbcencr(fname: str, key: np.ndarray):
     bpd = np.append(barr, padding)
     del pv, padding, barr
     gc.collect()
+    # Determine total bytes to encrypt
+    total_bytes = bpd.size
 
     # create an outfile name
     outfile = fname + '.enc'
-
     with open(outfile, 'w+b') as of:
-        ## Do CBC mode encr ##
-        # We need to iterate through pbd 16 bytes
-        # at a time, load them into a 4x4 state block
-        # array (stb) encrypt, flatten (fst) then write
-        # to outfile each time.
-        # Note that we do (state xor IV) _before_ we encrypt.
-        # The new state becomes the IV for the next CBC round.
-
-        # Get our random IV
+        # Write salt and IV
+        of.write(salt)
         iv = gen_iv()
-
-        # Write the IV to the first 16 bytes of the outfile
-        of.write(bytearray(iv.flatten()))
-
-        # The mark 'i' tracks our position in the padded byte array
+        iv_bytes = iv.flatten()
+        of.write(iv_bytes.tobytes())
+        # Initialize HMAC (encrypt-then-MAC)
+        h = hmac.new(mac_key, digestmod=hashlib.sha256)
+        h.update(salt)
+        h.update(iv_bytes.tobytes())
+        # Encrypt all padded blocks
         i = 0
-        while i < fsz:
-            # Get next 16 bytes from bpd
-            st = bpd[i:i+16]
-            # Reshape into block by column
-            stb = st.reshape(4, 4, order='F')
-            # xor state and IV
+        while i < total_bytes:
+            block = bpd[i:i+16]
+            stb = block.reshape(4, 4, order='F')
             stb ^= iv
-            # Call Cipher()
-            stb = Cipher(stb, key)
-            # Copy state to new IV
+            stb = Cipher(stb, key_sched)
             iv = stb.copy()
-            # Flatten state by column
             fst = stb.flatten(order='F')
-            # This writes the flattend blocks to file
-            of.write(bytearray(fst))
-            # Set i
-            i = of.tell() - 16
-        # End while
-    # End with, automatic of.close()
-
-    del bpd, st, stb, iv, fst
+            of.write(fst.tobytes())
+            h.update(fst.tobytes())
+            i += 16
+        # Append HMAC tag
+        of.write(h.digest())
+    # End with
+    # Cleanup
+    del bpd, block, stb, fst, iv, h
     gc.collect()
 # End cbcencr
 
 
-# Decrytp in CBC mode
-def cbcdecr(fname: str, key: np.ndarray):
+## Decrypt in CBC mode with authentication
+def cbcdecr(fname: str, key_sched: np.ndarray, mac_key: bytes) -> None:
     """
     Decrypts in CBC mode.
     Saves output as fname.dec
     """
 
-    # Strip off .enc extension
-    # create an outfile name
+    # Open encrypted file
+    with open(fname, 'rb') as inf:
+        data = inf.read()
+
+    # File format: salt(16) | iv(16) | ciphertext | tag(32)
+    if len(data) < 16 + 16 + 32:
+        raise ValueError("Encrypted file is too short or corrupted.")
+
+    salt = data[:16]
+    iv_bytes = data[16:32]
+    ciphertext = data[32:-32]
+    tag = data[-32:]
+
+    # Verify HMAC (encrypt-then-MAC)
+    h = hmac.new(mac_key, digestmod=hashlib.sha256)
+    h.update(salt)
+    h.update(iv_bytes)
+    h.update(ciphertext)
+    if not hmac.compare_digest(h.digest(), tag):
+        raise ValueError("HMAC verification failed: wrong passphrase or corrupted file.")
+
+    # Prepare decryption
+    iv = np.frombuffer(iv_bytes, dtype=np.uint8).reshape(4, 4)
+    # Load ciphertext into writable numpy array
+    ct_arr = np.frombuffer(ciphertext, dtype=np.uint8).copy()
+
+    # Output file name
     outfile = os.path.splitext(fname)[0] + '.dec'
-
-    # infile size
-    fsz = os.path.getsize(fname)
-
-    # get a numpy byte array
-    with open(fname, 'rb', encoding=None) as inf:
-        barr = np.fromfile(inf, dtype=np.uint8)
-
-    # Split barr[] to get IV and byte array
-    splits = np.split(barr, [16, fsz+1])
-    iv = splits[0].reshape(4, 4)
-    barr = splits[1]
-    # Adjust fsz
-    fsz = fsz - 16
-
-    # Strip off .enc extension
-    # create an outfile name
-    outfile = os.path.splitext(fname)[0] + '.dec'
-
-    with open(outfile, 'w+b') as of:
-        ## Do CBC mode decr ##
-        # We need to iterate through pbd 16 bytes
-        # at a time, load them into a 4x4 state block
-        # array (stb) decrypt, flatten (fst) then write
-        # to outfile each time.
-        # Note that we do (state xor IV) _after_ we decrypt.
-        # The new state becomes the IV for the next CBC round.
-
-        i = 0
-        while i < fsz:
-            # Get next 16 bytes from byte array
-            st = barr[i:i+16]
-            # Reshape into block by column
-            stb = st.reshape(4, 4, order='F')
-            # Copy state to a temp block
-            tb = stb.copy()
-            # Call Cipher()
-            stb = InvCipher(stb, key)
-            # xor state and IV
+    with open(outfile, 'wb') as of:
+        total_blocks = ct_arr.size // 16
+        for i in range(total_blocks):
+            block = ct_arr[i*16:(i+1)*16]
+            stb = block.reshape(4, 4, order='F')
+            prev = stb.copy()
+            # Decrypt block
+            stb = InvCipher(stb, key_sched)
+            # CBC combine
             stb ^= iv
-            # Copy tmp block (old state) to new IV
-            iv = tb.copy()
-            # Flatten state by column
+            iv = prev
             fst = stb.flatten(order='F')
-            # This writes the flattend blocks to file
-            of.write(bytearray(fst))
-            # Set i
-            i = of.tell()
-        # End while
-        # Get last byte value = padding bytes
-        of.seek(-1, 2)
-        pv = int.from_bytes(of.read(1), "little")
-        # Seek to cut-off point
-        of.seek(-pv, 2)
-        # Remove padding
-        of.truncate()
-    # End with, automatic of.close()
-    del fsz, st, stb, tb, iv, fst
-    gc.collect()
+            if i == total_blocks - 1:
+                # Remove PKCS padding
+                pad = int(fst[-1])
+                if pad < 1 or pad > 16:
+                    raise ValueError("Invalid padding encountered.")
+                of.write(fst[:-pad].tobytes())
+            else:
+                of.write(fst.tobytes())
+
 # End cbcdecr
 
 
@@ -511,27 +504,6 @@ def get_args() -> tuple:
 # End get_args
 
 
-def get_passkey() -> np.ndarray:
-    """
-    Get passphrase, generate key with sha256
-    """
-    # Make sure pwd is 16 characters min
-    plen = 1
-    while plen < 16:
-        pstr = getpass()
-        plen = len(pstr)
-
-    # The actual key is a hash of the passphrase
-    # We're basically enforcing 256bit encryption
-    # since the hash is always 32bytes/256bits
-    phsh = hashlib.sha256(str.encode(pstr)).digest()
-    pwd = np.zeros(32, dtype=np.uint8)
-    for i, b in enumerate(phsh):
-        pwd[i] = b
-    del phsh, pstr, plen
-    gc.collect()
-    return pwd
-# End get_passkey
 
 
 def main():
@@ -542,17 +514,30 @@ def main():
     # Get and set arguments
     do_encr,file,fsplt = get_args()
 
-    # Prompt for passphrase, build key schedule
-    pw = get_passkey()
-    key = KeyExpansion(pw)
+    # Handle invalid arguments
+    if do_encr is None:
+        return
+    # Prompt for passphrase
+    passphrase = get_passphrase()
 
     if do_encr is True:
+        # Derive keys for encryption
+        enc_key_bytes, mac_key, salt = derive_keys(passphrase)
+        key_schedule = KeyExpansion(enc_key_bytes)
         print('We will now encrypt', file, 'to '+file+'.enc')
-        cbcencr(file, key)
+        cbcencr(file, key_schedule, mac_key, salt)
     elif do_encr is False:
         print('We will now decrypt', file, 'to '+fsplt+'.dec')
-        cbcdecr(file, key)
-    del pw, key
+        # Read salt from encrypted file and derive keys
+        with open(file, 'rb') as inf:
+            salt = inf.read(16)
+        enc_key_bytes, mac_key, _ = derive_keys(passphrase, salt)
+        key_schedule = KeyExpansion(enc_key_bytes)
+        cbcdecr(file, key_schedule, mac_key)
+
+    # Cleanup
+    del passphrase, enc_key_bytes, mac_key, salt, key_schedule
+    gc.collect()
     gc.collect()
 # End main
 
