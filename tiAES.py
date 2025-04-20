@@ -2,7 +2,6 @@
 # tiAES.py
 # (c) 2024 J. Adams jfa63[at]duck[dot]com
 # Released under the 2-clause BSD Licence
-# Thanks to jfx2006 for contributions and advice.
 
 """
  This implementation tries to by fully compliant with the FIPS 197 Advanced Encryption
@@ -30,32 +29,6 @@ from aes_tables import (NB,
                         m13,
                         m14)
  
-# ----------------------------------------------------------------------------
-def get_passphrase() -> str:
-    """
-    Prompt for a passphrase (minimum length: 16 characters).
-    """
-    plen = 0
-    while plen < 16:
-        pstr = getpass("Enter passphrase (min 16 chars): ")
-        plen = len(pstr)
-    return pstr
-
-def derive_keys(passphrase: str, salt: bytes = None, iterations: int = 100000) -> tuple:
-    """
-    Derive AES encryption key and HMAC key from a passphrase using PBKDF2-HMAC-SHA256.
-    Returns (enc_key_array, mac_key_bytes, salt).
-    """
-    if salt is None:
-        salt = os.urandom(16)
-    # Derive 64 bytes: first 32 for AES key, next 32 for HMAC key
-    km = hashlib.pbkdf2_hmac('sha256', passphrase.encode(), salt, iterations, dklen=64)
-    enc_key = np.frombuffer(km[:32], dtype=np.uint8)
-    mac_key = km[32:]
-    del km
-    gc.collect()
-    return enc_key, mac_key, salt
-# ----------------------------------------------------------------------------
 
 
 ## Functions
@@ -341,6 +314,7 @@ def gen_iv() -> np.ndarray:
     return iv
 # End gen_iv
 
+
 def get_pad(sz: int) -> int:
     """
     Calculates padding size.
@@ -356,7 +330,37 @@ def get_pad(sz: int) -> int:
         pd = 0x10
 
     return pd
-# End get_pad
+# End get_pad 
+
+
+def get_passphrase() -> str:
+    """
+    Prompt for a passphrase (minimum length: 16 characters).
+    """
+    plen = 0
+    while plen < 16:
+        pstr = getpass("Enter passphrase: ")
+        plen = len(pstr)
+    return pstr
+# End get_passphrase 
+
+
+def derive_keys(passphrase: str, salt: bytes = None, iterations: int = 100000) -> tuple:
+    """
+    Derive AES encryption key and HMAC key from a passphrase using PBKDF2-HMAC-SHA256.
+    Returns (enc_key_array, mac_key_bytes, salt).
+    """
+    if salt is None:
+        salt = os.urandom(16)
+    # Derive 64 bytes: first 32 for AES key, next 32 for HMAC key
+    km = hashlib.pbkdf2_hmac('sha256', passphrase.encode(), salt, iterations, dklen=64)
+    enc_key = np.frombuffer(km[:32], dtype=np.uint8)
+    mac_key = km[32:]
+    del km
+    gc.collect()
+    return enc_key, mac_key, salt
+# End drive_keys 
+
 
 def cbcencr(fname: str, key_sched: np.ndarray, mac_key: bytes, salt: bytes) -> None:
     """
@@ -505,7 +509,6 @@ def get_args() -> tuple:
 
 
 
-
 def main():
     """
     Our main()
@@ -537,7 +540,6 @@ def main():
 
     # Cleanup
     del passphrase, enc_key_bytes, mac_key, salt, key_schedule
-    gc.collect()
     gc.collect()
 # End main
 
