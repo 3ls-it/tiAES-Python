@@ -1,2 +1,2 @@
-# Requirements
+# Third-party dependencies for tiAES Python version. 
 numpy>=1.26.2
