@@ -13,7 +13,7 @@ It is meant to be run on any system with python 3.x and the NumPy library instal
 
 __USAGE__
 
-Download the files tiAES.py and pyaes_tables.py and put them in the same directory. Other than the standard Python libraries, you will need NumPy installed:
+Download the files tiAES.py and aes_tables.py and put them in the same directory. Other than the standard Python libraries, you will need NumPy installed:
 
     $ pip3 install numpy
 or
