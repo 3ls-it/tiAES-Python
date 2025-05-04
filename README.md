@@ -39,7 +39,7 @@ The decrypt will look for the file extension '.enc'. To decrypt:
 which will write the file filename.dec.  
 
 
-# HMAC Overview
+__HMAC Overview__
 
 HMAC (Hash-based Message Authentication Code) in this scheme serves to give you tamper-proof integrity and authentication on top of the confidentiality provided by AES:
 
@@ -49,20 +49,20 @@ HMAC (Hash-based Message Authentication Code) in this scheme serves to give you 
 
 Without the HMAC step you’d risk subtle malleability or padding-oracle attacks and you wouldn’t be able to tell whether the ciphertext you’re about to decrypt has been corrupted or maliciously altered.
 
-## Changes April/May 2025:
+__Changes April/May 2025:__
 
-### In `cbcencr()`
+  In `cbcencr()`
 
 - Fixed the loop condition by setting `total_bytes = bpd.size`, so every padded block actually gets encrypted and fed into the HMAC.
 - After writing `salt | IV | ciphertext`, we now append `h.digest()` (the 32-byte tag).
 
-### In `cbcdecr()`
+  In `cbcdecr()`
 
 - Switched to reading the file as `salt(16) | IV(16) | ciphertext | tag(32)`.
 - Immediately verify the tag with `hmac.compare_digest`; if it fails, decryption is aborted.
 - Only if the HMAC checks out do we proceed to decrypt the blocks and strip PKCS#7 padding.
 
-### In `main()`
+  In `main()`
 
 - For decryption we first read the salt off-disk and re-derive the exact same AES+HMAC keys before calling `cbcdecr()`.
 
